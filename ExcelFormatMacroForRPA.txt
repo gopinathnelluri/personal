@@ -1,0 +1,66 @@
+Sub Macro3()
+'
+' Macro3 Macro
+'
+
+'
+    'Sheet1.Activate
+    'Sheet1.Cells.Select
+    
+    Application.DisplayAlerts = False
+    
+    Dim intRowCount
+    intRowCount = Sheet1.UsedRange.Rows.Count
+    Dim intCoulmnCount
+    intCoulmnCount = Sheet1.UsedRange.Columns.Count
+    
+    'MsgBox Sheet1.Cells(2, 2).MergeArea.Cells.Count
+    'MsgBox Sheet1.Cells(1, 1).MergeArea.Rows.Count
+    
+    Dim x
+    x = 1
+    Dim tempRowCount
+    tempRowCount = 0
+    Dim fromCellRange
+    Dim toCellRange
+    Do While x < intRowCount
+        tempRowCount = Sheet1.Cells(x, 1).MergeArea.Rows.Count
+        If tempRowCount > 1 Then
+            'MsgBox tempRowCount
+            fromCellRange = x
+            'MsgBox fromCell
+            'Sheet1.Range("B:E6").Merge
+            x = x + (tempRowCount - 1)
+            toCellRange = x
+            'MsgBox toCell
+            Dim cellBContent: cellBContent = ""
+            Dim cellCContent: cellCContent = ""
+            For i = fromCellRange To toCellRange
+            
+                If cellBContent <> "" Then
+                    cellBContent = cellBContent & vbNewLine & Sheet1.Cells(i, 2).Value
+                Else
+                    cellBContent = Sheet1.Cells(i, 2).Value
+                End If
+                
+                If cellCContent <> "" Then
+                    cellCContent = cellCContent & vbNewLine & Sheet1.Cells(i, 3).Value
+                Else
+                    cellCContent = Sheet1.Cells(i, 3).Value
+                End If
+                
+            Next
+            'MsgBox cellBContent
+            Sheet1.Range("B" & fromCellRange & ":" & "B" & toCellRange).Merge
+            Sheet1.Cells(fromCellRange, 2).Value = cellBContent
+            
+            Sheet1.Range("C" & fromCellRange & ":" & "C" & toCellRange).Merge
+            Sheet1.Cells(fromCellRange, 3).Value = cellCContent
+        End If
+    
+    x = x + 1
+    Loop
+    
+    
+    
+End Sub
