@@ -1,0 +1,7 @@
+else if ((ob1.getBox() == null || ob1.getBox().isEmpty()) && ob2.getBox() != null && !ob2.getBox().isEmpty()){
+    return -1;
+} else if ( ob1.getBox() != null && !ob1.getBox().isEmpty() && ( ob2.getBox() == null || ob2.getBox().isEmpty())){
+    return 1;
+} else {
+    return 0;
+}
