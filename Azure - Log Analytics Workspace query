@@ -17,3 +17,13 @@ AzureMetrics
 | project TimeGenerated, Usage, Category
 | where TimeGenerated > ago(180d)
 | render timechart
+
+
+
+AzureMetrics
+| where ResourceProvider == "MICROSOFT.POSTGRESQL" and MetricName == "storage_used"
+| summarize AggregatedValue = avg(Average) by bin(TimeGenerated, 1d), ResourceId
+| extend Usage = round(AggregatedValue / 1024 / 1024 / 1024, 2)
+| project TimeGenerated, UsageLabel = strcat(tostring(Usage), " GB")
+| where TimeGenerated > ago(180d)
+| render timechart
