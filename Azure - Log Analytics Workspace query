@@ -1,0 +1,19 @@
+Perf
+| where ObjectName == "Processor" and CounterName == "% Processor Time" and InstanceName == "_Total" or ObjectName == "LogicalDisk" and CounterName == "% Free Space" and InstanceName == "_Total"
+| summarize AggregatedValue = avg(CounterValue) by bin(TimeGenerated, 1d), ObjectName, CounterName
+| where AggregatedValue > 0
+| extend Usage = iff(ObjectName == "Processor", AggregatedValue, 100 - AggregatedValue)
+| extend Category = iff(ObjectName == "Processor", "Compute", "Storage")
+| project TimeGenerated, Usage, Category
+| where TimeGenerated > ago(180d)
+| render timechart
+
+
+AzureMetrics
+| where ResourceProvider == "MICROSOFT.POSTGRESQL" and MetricName == "cpu_percent" or MetricName == "storage_used"
+| summarize AggregatedValue = avg(Average) by bin(TimeGenerated, 1d), ResourceId, MetricName
+| extend Usage = iff(MetricName == "cpu_percent", AggregatedValue, AggregatedValue / 1024 / 1024)
+| extend Category = iff(MetricName == "cpu_percent", "Compute", "Storage")
+| project TimeGenerated, Usage, Category
+| where TimeGenerated > ago(180d)
+| render timechart
