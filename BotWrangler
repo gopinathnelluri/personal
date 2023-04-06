@@ -1,0 +1,15 @@
+Default App Preferences for files
+=================
+
+' This script updates the default program for .xml files to always open using Notepad.
+
+' Import the Shell object.
+Set objShell = CreateObject("Shell.Application")
+
+' Get the default program for .xml files.
+strDefaultProgram = objShell.Application.DefaultProgramFor(".xml")
+
+' If the default program is not Notepad, set it to Notepad.
+If strDefaultProgram <> "Notepad.exe" Then
+    objShell.Application.DefaultProgramFor(".xml") = "Notepad.exe"
+End If
