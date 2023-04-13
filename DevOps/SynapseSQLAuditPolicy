@@ -1,0 +1,15 @@
+resource "null_resource" "synapse_audit" {
+  triggers = {
+    workspace_id = azurerm_synapse_workspace.synps.id
+  }
+  provisioner "local-exec" {
+    command = <<-EOT
+      az synapse sql audit-policy update \
+        --resource-group ${azurerm_resource_group.rg.name} \
+        --workspace-name ${azurerm_synapse_workspace.synps.name} \
+        --state Enabled \
+        --log-analytics-target-state Enabled \
+        --log-analytics-workspace-resource-id ${azurerm_log_analytics_workspace.law.id}
+    EOT
+  }
+}
