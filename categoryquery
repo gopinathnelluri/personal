@@ -1,0 +1,68 @@
+Dim conn, rs
+Dim startDate, endDate
+Dim sqlQuery, dateExpressions
+
+' Set dynamic start and end dates
+startDate = DateAdd("m", -3, Now()) ' Three months ago from today
+endDate = Now() ' Current date
+
+' Create connection object
+Set conn = CreateObject("ADODB.Connection")
+
+' Connection string
+conn.ConnectionString = "Provider=SQLOLEDB;Data Source=YourServerName;Initial Catalog=YourDatabaseName;Integrated Security=SSPI;"
+
+' Open connection
+conn.Open
+
+' Create recordset object
+Set rs = CreateObject("ADODB.Recordset")
+
+' Initialize date expressions
+dateExpressions = ""
+
+' Construct date expressions dynamically
+For i = 0 To DateDiff("d", startDate, endDate)
+    currentDate = DateAdd("d", i, startDate)
+    dateExpression = "MAX(CASE WHEN CONVERT(date, DateTime) = '" & FormatDateTime(currentDate, 2) & "' THEN qValue END) AS [" & FormatDateTime(currentDate, 2) & "],"
+    dateExpressions = dateExpressions & dateExpression & " "
+Next
+
+' Remove trailing comma
+dateExpressions = Left(dateExpressions, Len(dateExpressions) - 2)
+
+' Construct SQL query dynamically with dates
+sqlQuery = "SELECT " & _
+            "Category, " & _
+            "FORMAT(DateTime, 'HH:mm') AS HalfHour, " & _
+            dateExpressions & _
+            "FROM YourTableName " & _
+            "WHERE DateTime >= '" & FormatDateTime(startDate, 2) & "' AND DateTime <= '" & FormatDateTime(endDate, 2) & "' " & _
+            "GROUP BY " & _
+            "Category, " & _
+            "FORMAT(DateTime, 'HH:mm') " & _
+            "ORDER BY " & _
+            "Category, " & _
+            "FORMAT(DateTime, 'HH:mm');"
+
+' Execute query
+rs.Open sqlQuery, conn
+
+' Print column names
+For Each fld In rs.Fields
+    WScript.StdOut.Write fld.Name & vbTab
+Next
+WScript.StdOut.WriteLine
+
+' Print data
+Do Until rs.EOF
+    For Each fld In rs.Fields
+        WScript.StdOut.Write fld.Value & vbTab
+    Next
+    WScript.StdOut.WriteLine
+    rs.MoveNext
+Loop
+
+' Close recordset and connection
+rs.Close
+conn.Close
