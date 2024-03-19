@@ -63,6 +63,15 @@ Do Until rs.EOF
     rs.MoveNext
 Loop
 
+
+
+lastColumn = targetRow.Find(What:="*", _
+                             After:=targetRow.Cells(1, 1), _
+                             LookIn:=xlFormulas, _
+                             LookAt:=xlPart, _
+                             SearchOrder:=xlByColumns, _
+                             SearchDirection:=xlPrevious, _
+                             MatchCase:=False).Column
 ' Close recordset and connection
 rs.Close
 conn.Close
