@@ -1,1 +1,32 @@
 
+flowchart LR
+ subgraph puma["Client"]
+        chat["Bot"]
+  end
+ subgraph r2d2["gateway"]
+        model["Model"]
+  end
+ subgraph mcps["MCP servers"]
+    direction TB
+        sb["<b>SB MCP Tools</b><br><i>no LLM</i><br>· Cluster identification and health check<br>· Access validation<br>· <b>Config Auditor</b><br>· <b>Query Plan Analyzer</b>"]
+        adm["sb-ad-mcp<br><i>AD group membership</i>"]
+        rag["RAG / docs"]
+  end
+ subgraph fleet["Starburst fleet"]
+    direction TB
+        target["<b>Target cluster</b><br><i>the one identified</i>"]
+        audit[("audit db catalog<br><i>completed queries</i>")]
+        others["other clusters<br><i>100s</i>"]
+  end
+    target --- audit
+    user(["User"]) --> chat
+    chat --> agent["<b>Agent</b><br><i>decides which tools to call,<br>writes the answer</i>"]
+    agent -- prompt / completion --> r2d2
+    agent -- tool call / findings<br><i>MCP</i> --> sb
+    agent -- context<br><i>MCP</i> --> rag
+    agent -. group members .-> adm
+    sb -. cluster url, authorised group .-> mw[("Cluster details API<br><i>env · sector · url ·<br>authorised AD group</i>")]
+    sb -. health check, access probe .-> target
+    sb --> cos[("IBM COS<br><i>config backups</i>")]
+    sb --> audit
+    fleet -. backed up nightly .-> cos
