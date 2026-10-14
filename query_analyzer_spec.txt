@@ -1,0 +1,279 @@
+QUERY ANALYZER: DETECTOR SPEC
+"Partition pruning defeated" and "Scan grows with table size"
+For: Starburst / Trino, Iceberg (Hive tables work the same way)
+
+======================================================================
+1. CONTEXT
+======================================================================
+
+We are building a query analyzer for Starburst. It runs as a set of
+deterministic tools behind an MCP server; a parent agent calls the tools
+and an LLM writes the explanation for the user.
+
+Core rule: the LLM never decides whether something is a problem. Python
+code computes findings from evidence (numbers pulled from the cluster).
+The LLM only explains findings that the code returns. If no detector
+fires, the answer is "no issue found", not a guess.
+
+This spec covers two related detectors:
+
+  D1. PARTITION_PRUNING_DEFEATED
+      A filter wraps a partition column in a function or cast, so the
+      engine cannot skip partitions and reads the whole table.
+
+  D2. SCAN_GROWTH_SAME_RESULT
+      The same query, run twice, returns about the same number of rows but
+      reads much more data the second time. The scan is tracking table
+      size, not the size of the answer.
+
+D1 explains WHY. D2 shows the COST getting worse over time. When both fire
+on the same query, report them together as one root cause.
+
+======================================================================
+2. DEMO SCENARIO THIS MUST HANDLE (test case)
+======================================================================
+
+Table: demo_catalog.demo_schema.orders_demo
+  Iceberg, PARQUET, partitioning = ARRAY['event_date'] (identity, type date)
+  Load 1: 30 daily partitions (Sep 2026), ~2.1M rows, ~100-150 MB
+  Load 2: 30 more daily partitions (Oct 2026), table doubles
+
+Bad query (runs before and after load 2):
+  SELECT region, count(*), sum(amount)
+  FROM orders_demo
+  WHERE date_format(event_date, '%Y-%m-%d') = '2026-09-15'
+  GROUP BY region
+
+Good query:
+  ... WHERE event_date = DATE '2026-09-15' ...
+
+Expected agent answer, in substance:
+  "Your filter wraps event_date (the partition column) in date_format(),
+   so Starburst can't skip partitions. It read all 60 days (X MB) to
+   return one day. The same query read Y MB last time; it doubled because
+   the table doubled, and it will keep growing. Rewrite the filter as
+   event_date = DATE '2026-09-15'. That reads one partition (about Z MB)."
+
+======================================================================
+3. TOOL INTERFACE
+======================================================================
+
+analyze_query(cluster: str, query_id: str, compare_query_id: str | None = None)
+  -> { "query_id": ..., "findings": [Finding, ...], "evidence": {...} }
+
+Finding (JSON):
+{
+  "id": "PARTITION_PRUNING_DEFEATED" | "SCAN_GROWTH_SAME_RESULT",
+  "severity": "high" | "medium" | "low",
+  "table": "catalog.schema.table",
+  "summary": "one plain sentence",
+  "evidence": { ...numbers and snippets, see below... },
+  "recommendation": "plain sentence",
+  "suggested_rewrite": "SQL predicate, or null if not safe to suggest",
+  "confidence": "confirmed" | "likely"
+}
+
+Read-only: the tools never run DDL/DML. Do not run EXPLAIN ANALYZE on a
+user's query by default (it executes the query). Plain EXPLAIN is allowed
+for SELECT statements only.
+
+======================================================================
+4. DATA SOURCES (all read-only)
+======================================================================
+
+A. Query info from the coordinator REST API
+   GET https://<coordinator>/v1/query/{queryId}
+   Headers: authentication as configured on the cluster; X-Trino-User.
+   Fields used:
+     query                                   SQL text
+     state                                   must be FINISHED for D2
+     inputs[]: catalogName, schema, table    tables read
+     queryStats.physicalInputDataSize        bytes read from storage
+     queryStats.physicalInputPositions       rows read from storage
+     queryStats.outputPositions              rows returned
+     queryStats.queuedTime, elapsedTime, executionTime
+     queryStats.operatorSummaries[]          per-operator input size; use
+                                             operatorType containing
+                                             "TableScan" or "ScanFilter"
+   Data sizes and durations are strings with units ("1.85GB", "12.40s").
+   Write one parser for each and unit-test it.
+   Completed queries expire from the coordinator (query.min-expire-age,
+   query.max-history). If the query is gone, return a clear error. Long
+   term: snapshot QueryInfo JSON on completion (event listener or Starburst
+   Insights) so history is available.
+
+B. Table definition
+   SHOW CREATE TABLE <catalog>.<schema>.<table>
+   Parse:  partitioning = ARRAY['event_date', 'day(created_ts)', ...]
+   Iceberg transforms to handle: identity (bare column), year(c), month(c),
+   day(c), hour(c), bucket(n, c), truncate(n, c). Record source column
+   and transform. Hive: partitioned_by = ARRAY[...].
+
+C. Table size and partition counts
+   SELECT count(*), sum(record_count), sum(total_size)
+   FROM <catalog>.<schema>."<table>$partitions"
+   Gives total partitions and bytes at the time of analysis.
+
+D. Plan (optional confirmation, SELECT only)
+   EXPLAIN <query text>
+   In the TableScan / ScanFilterProject node, a pushed-down partition
+   filter appears as a constraint/domain on the partition column. With a
+   function-wrapped filter, the column has no constraint and the function
+   appears in a filterPredicate above the scan instead.
+   IMPORTANT: the exact EXPLAIN text varies by Trino/SEP version. Do not
+   hard-code it from memory. Capture EXPLAIN output for the demo's good and
+   bad query on OUR cluster, store both as test fixtures, and match against
+   what they actually show.
+
+======================================================================
+5. DETECTOR D1: PARTITION_PRUNING_DEFEATED
+======================================================================
+
+Step 1. Get partition columns and transforms for each table in inputs[].
+        If a table has no partitioning, D1 does not apply to it.
+
+Step 2. Parse the SQL with sqlglot (dialect="trino"). Do not use regex
+        on SQL. Find WHERE / JOIN ON predicates that reference a partition
+        source column.
+
+Step 3. Classify each such predicate:
+        PRUNABLE (skip):
+          col = literal, col IN (...), col BETWEEN a AND b, col >/</>=/<= literal
+          For day(ts)/month(ts) partitions: ts >= TIMESTAMP ... AND ts < ...
+        NOT PRUNABLE (flag), the column is inside:
+          date_format, format_datetime, to_char-like formatting
+          CAST(col AS varchar) / CAST(col AS char)
+          substr / substring / concat / || / lower / upper / trim
+          arithmetic: col + INTERVAL ..., date_add(..., col), date_diff(...)
+          any user-defined function
+        DO NOT FLAG (Trino rewrites these into prunable ranges):
+          CAST(timestamp_col AS date) = DATE '...'
+          year(col) = N
+          date_trunc('day'|'month'|'year', col) = literal
+        Keep both lists in a YAML file (rules/pruning_functions.yaml) so
+        they can be changed without touching code.
+
+Step 4. Confirm with measured evidence (this is what makes it "confirmed"):
+          scanned_bytes   = physicalInputDataSize (from TableScan operators
+                            for that table, or query total if single table)
+          table_bytes     = sum(total_size) from $partitions
+          scan_ratio      = scanned_bytes / table_bytes
+          selectivity     = outputPositions / physicalInputPositions
+        Confirmed if:  a NOT PRUNABLE predicate exists
+                       AND scan_ratio >= 0.8
+                       AND (partitions in table >= 5)
+        Likely if:     NOT PRUNABLE predicate exists but scan_ratio is
+                       unavailable (query expired, multi-table ambiguity).
+        Note: if data was added after the query ran, table_bytes today can
+        exceed bytes scanned then. Prefer partition counts at query time
+        when available; otherwise mark confidence "likely" and say why.
+        Thresholds go in config, not code.
+
+Step 5. Suggested rewrite (only for patterns we can rewrite safely):
+          date_format(col, '%Y-%m-%d') = 'YYYY-MM-DD'  ->  col = DATE 'YYYY-MM-DD'
+          CAST(col AS varchar) = 'YYYY-MM-DD'          ->  col = DATE 'YYYY-MM-DD'
+          substr(CAST(col AS varchar),1,7) = 'YYYY-MM' ->  col >= DATE 'YYYY-MM-01'
+                                                         AND col < DATE '<next month>-01'
+          For timestamp col with day(col) partitioning, date literal D:
+                                                       ->  col >= TIMESTAMP 'D 00:00:00'
+                                                         AND col < TIMESTAMP 'D+1 00:00:00'
+        If the pattern is not in the list, set suggested_rewrite = null and
+        recommend "filter on <col> directly, without a function".
+
+Step 6. Evidence to return:
+          predicate_snippet, partition_column, transform,
+          scanned_bytes, table_bytes, scan_ratio,
+          partitions_total, rows_read, rows_returned,
+          estimated_bytes_if_pruned (avg partition size x partitions matched
+          by the rewritten filter, when a rewrite exists)
+
+======================================================================
+6. DETECTOR D2: SCAN_GROWTH_SAME_RESULT
+======================================================================
+
+Inputs: query_id and compare_query_id. Both must be FINISHED.
+
+Step 1. Same query? Normalize both SQL texts with sqlglot (parse, strip
+        comments, normalize whitespace and case, re-render) and compare.
+        If different, D2 does not apply; say so.
+
+Step 2. Compare (older run = A, newer run = B):
+          output_ratio = B.outputPositions / A.outputPositions
+          scan_ratio   = B.physicalInputDataSize / A.physicalInputDataSize
+        Fire if:  0.8 <= output_ratio <= 1.25   (about the same answer)
+                  AND scan_ratio >= 1.5          (much more data read)
+        Thresholds in config.
+
+Step 3. Separate cost from waiting: also report
+          A.queuedTime vs B.queuedTime and executionTime for both.
+        If queue time explains most of the elapsed-time difference, add a
+        note that the cluster was busy; that is a different finding
+        (cluster contention) and must not be blamed on the SQL.
+
+Step 4. Evidence: both query IDs, run times, rows returned, bytes read,
+        scan_ratio, and table size now (from $partitions).
+
+Step 5. Link to D1: if D1 fires on the same query, set the summary to
+        "Scan is growing with the table because the filter cannot use
+        partitions" and give one combined recommendation.
+
+======================================================================
+7. WHAT THE LLM RECEIVES AND SAYS
+======================================================================
+
+The LLM gets only the findings JSON. Instructions to the LLM:
+  - Explain in plain language, 4-6 sentences.
+  - Lead with what happened, then why, then the fix.
+  - Quote the numbers from evidence; never invent numbers.
+  - If findings is empty: say no issue was found in the checks run, and
+    list which checks ran.
+  - Show the suggested rewrite as a code block when present.
+
+======================================================================
+8. TESTS (pytest, fixtures, no live cluster needed)
+======================================================================
+
+Fixtures to capture once from the demo cluster and commit (redacted):
+  query_info_bad_run1.json, query_info_bad_run2.json,
+  query_info_good_run1.json, show_create_orders_demo.txt,
+  partitions_after_load2.json, explain_bad.txt, explain_good.txt
+
+Required tests:
+  1. bad_run1 alone        -> D1 confirmed, rewrite suggested
+  2. good_run1 alone       -> no findings
+  3. bad_run1 vs bad_run2  -> D1 + D2, scan_ratio ~2.0, output_ratio ~1.0
+  4. good_run1 vs good_run2 (if captured) -> no D2
+  5. CAST(ts AS date) = DATE '...' on day(ts) table -> NOT flagged
+  6. year(col) = 2026 -> NOT flagged
+  7. Unpartitioned table -> D1 not applicable
+  8. Expired query ID -> clear error, no findings, no crash
+  9. Two different queries passed to D2 -> "not the same query"
+ 10. Data size / duration string parser: "512B", "1.5kB", "12.34MB",
+     "1.85GB", "250ms", "12.40s", "3.20m"
+
+======================================================================
+9. PROJECT LAYOUT (matches the rest of the analyzer)
+======================================================================
+
+core/analysis/query_info.py         fetch + parse QueryInfo, unit parsers
+core/analysis/table_meta.py         SHOW CREATE TABLE parsing, $partitions
+core/analysis/sql_predicates.py     sqlglot-based predicate extraction
+core/analysis/detectors/pruning.py  D1
+core/analysis/detectors/scan_growth.py  D2
+core/rules/pruning_functions.yaml   prunable / not prunable lists
+core/models.py                      Finding, Evidence
+mcp_server/server.py                analyze_query tool (thin wrapper)
+tests/fixtures/...                  captured JSON/text from the demo
+
+Python 3.11, type hints, mypy --strict, ruff. No network calls in core
+detectors: adapters fetch data, detectors are pure functions of that data.
+
+======================================================================
+10. OUT OF SCOPE FOR THIS ITERATION
+======================================================================
+
+  - Running EXPLAIN ANALYZE automatically
+  - Rewriting and executing the user's query
+  - Joins where the partition filter arrives through dynamic filtering
+    (note it as "not analyzed" rather than guessing)
+  - Materialized view suggestions (separate detector)
